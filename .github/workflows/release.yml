@@ -2,7 +2,8 @@ name: Release
 
 # Builds the universal DMG on a macOS runner and attaches it to the release
 # for the tag being built. Push a tag (`git tag v1.1.0 && git push origin
-# v1.1.0`) or run this manually against an existing tag.
+# v1.1.0`) or run this manually against a tag that has no published release
+# yet — see the Publish step for why an existing one cannot be topped up.
 on:
   push:
     tags: ['v*']
@@ -60,9 +61,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.name }}
         run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
+          # This repo has immutable releases turned on, which freezes a
+          # release's assets the moment it is published. Creating the release
+          # and *then* uploading — which is what this step used to do — fails
+          # with "422 Cannot upload assets to an immutable release", leaving a
+          # release with nothing but GitHub's auto-generated source archives.
+          #
+          # Handing the DMG to `gh release create` avoids that: given assets,
+          # gh creates the release as a draft, uploads them, and only then
+          # publishes it. A draft is still mutable, so the DMG lands before
+          # immutability takes effect.
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+            # A draft left behind by an earlier run: still mutable, so finish it.
+            gh release upload "$TAG" dist/*.dmg --clobber
+            gh release edit "$TAG" --draft=false
+          elif gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG is already published and immutable — its" \
+                 "assets are frozen and the tag name cannot be reused." \
+                 "Bump the version and cut a new tag."
+            exit 1
+          else
             gh release create "$TAG" \
               --title "Captured ${TAG#v}" \
-              --notes-file .github/RELEASE_NOTES.md
+              --notes-file .github/RELEASE_NOTES.md \
+              dist/*.dmg
           fi
-          gh release upload "$TAG" dist/*.dmg --clobber
